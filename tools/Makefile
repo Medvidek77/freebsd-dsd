@@ -1,15 +1,6 @@
-CC = cc
-CFLAGS = -Wall -Wextra -O2
+PROGS=	dsfplay dsfinfo
+SRCS.dsfplay=	dsfplay.c
+SRCS.dsfinfo=	dsfinfo.c
+MAN=
 
-TARGETS = dsfplay dsfinfo
-
-all: $(TARGETS)
-
-dsfplay: dsfplay.c
-	$(CC) $(CFLAGS) -o dsfplay dsfplay.c
-
-dsfinfo: dsfinfo.c
-	$(CC) $(CFLAGS) -o dsfinfo dsfinfo.c
-
-clean:
-	rm -f $(TARGETS)
+.include <bsd.progs.mk>
