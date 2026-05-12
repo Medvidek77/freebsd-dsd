@@ -14,18 +14,10 @@ index de535ec2d..0612271e7 100644
 	else if (fmt & AFMT_MU_LAW)
 		return (0x7f);
 diff --git a/sys/dev/sound/pcm/channel.c b/sys/dev/sound/pcm/channel.c
-index 4d13f20a5..a0a7baf63 100644
+index 4d13f20a5..ad2a25b3c 100644
 --- a/sys/dev/sound/pcm/channel.c
 +++ b/sys/dev/sound/pcm/channel.c
-@@ -964,6 +964,7 @@ static const struct {
-	{    "u8",   "8", NULL, AFMT_U8     },
-	{    "s8",  NULL, NULL, AFMT_S8     },
-	{   "ac3",  NULL, NULL, AFMT_AC3    },
-+	{   "dsd",  NULL, NULL, AFMT_DSD    },
- #if BYTE_ORDER == LITTLE_ENDIAN
-	{ "s16le", "s16", "16", AFMT_S16_LE },
-	{ "s16be",  NULL, NULL, AFMT_S16_BE },
-@@ -2372,8 +2373,10 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+@@ -2372,8 +2372,10 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
  {
 	struct pcm_channel *ch;
 	struct pcmchan_caps *caps;
@@ -36,7 +28,7 @@ index 4d13f20a5..a0a7baf63 100644
 	int dirty, err, run, nrun;
 
 	CHN_LOCKASSERT(c);
-@@ -2432,6 +2435,8 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+@@ -2432,6 +2434,8 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
 	}
 
 	if (flags & CHN_N_TRIGGER) {
@@ -45,7 +37,7 @@ index 4d13f20a5..a0a7baf63 100644
 		if (c->direction == PCMDIR_PLAY) {
 			vchanformat = &c->parentsnddev->pvchanformat;
 			vchanrate = &c->parentsnddev->pvchanrate;
-@@ -2459,8 +2464,16 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+@@ -2459,8 +2463,16 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
 			CHN_LOCK(ch);
 			if ((ch->format & AFMT_PASSTHROUGH) &&
 			    snd_fmtvalid(ch->format, caps->fmtlist)) {
@@ -64,7 +56,7 @@ index 4d13f20a5..a0a7baf63 100644
 				CHN_UNLOCK(ch);
 				vpflags = CHN_F_PASSTHROUGH;
 				nrun++;
-@@ -2561,6 +2574,7 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+@@ -2561,6 +2573,7 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
 		}
 
 		if (err == 0 && !(bestformat & AFMT_PASSTHROUGH) &&
@@ -73,32 +65,32 @@ index 4d13f20a5..a0a7baf63 100644
 			*vchanformat = bestformat;
 			*vchanrate = bestspeed;
 diff --git a/sys/dev/sound/pcm/dsp.c b/sys/dev/sound/pcm/dsp.c
-index fe5576baf..9c33e73ef 100644
+index fe5576baf..cf95e93a1 100644
 --- a/sys/dev/sound/pcm/dsp.c
 +++ b/sys/dev/sound/pcm/dsp.c
-@@ -1437,6 +1437,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
-				*arg_i = 24;
-			else if (chn->format & AFMT_32BIT)
-				*arg_i = 32;
-+			else if (chn->format & AFMT_DSD)
-+				*arg_i = 32;
-			else
-				ret = EINVAL;
-			CHN_UNLOCK(chn);
+@@ -1271,6 +1271,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
+				    AFMT_CHANNEL(wrch->format),
+				    AFMT_EXTCHANNEL(wrch->format)));
+				tmp = wrch->format;
++				if (tmp & AFMT_DSD)
++					wrch->flags |= CHN_F_BITPERFECT;
+				CHN_UNLOCK(wrch);
+			}
+			if (rdch && ret == 0) {
+@@ -1280,6 +1282,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
+				    AFMT_EXTCHANNEL(rdch->format)));
+				if (tmp == 0)
+					tmp = rdch->format;
++				if (tmp & AFMT_DSD)
++					rdch->flags |= CHN_F_BITPERFECT;
+				CHN_UNLOCK(rdch);
+			}
+			PCM_RELEASE_QUICK(d);
 diff --git a/sys/dev/sound/pcm/feeder.c b/sys/dev/sound/pcm/feeder.c
-index af3ada441..b47e73140 100644
+index af3ada441..e00d04526 100644
 --- a/sys/dev/sound/pcm/feeder.c
 +++ b/sys/dev/sound/pcm/feeder.c
-@@ -291,6 +291,8 @@ snd_fmtscore(u_int32_t fmt)
-		ret |= 1 << 12;
-	else if (fmt & AFMT_32BIT)
-		ret |= 1 << 13;
-+	else if (fmt & AFMT_DSD)
-+		ret |= 1 << 14;
-
-	return ret;
- }
-@@ -317,14 +319,15 @@ snd_fmtbestfunc(u_int32_t fmt, u_int32_t *fmts, int cheq)
+@@ -317,14 +317,15 @@ snd_fmtbestfunc(u_int32_t fmt, u_int32_t *fmts, int cheq)
 		    (oldscore != 0 && score_chgt(score2, oldscore))))
 				continue;
 		if (oldscore == 0 ||
