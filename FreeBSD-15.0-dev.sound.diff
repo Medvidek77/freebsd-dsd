@@ -778,7 +778,7 @@ index ff9f59fe42ab..37318b22c025 100644
 +int
 +uaudio_chan_reset(struct uaudio_chan *ch)
 +{
-+	msleep(ch, ch->pcm_mtx, 0, "reset", 50);
++	DELAY(50);
 +	return (0);
 +}
 +
