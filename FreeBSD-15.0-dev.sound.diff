@@ -1,5 +1,5 @@
 diff --git a/sys/dev/sound/pcm/buffer.c b/sys/dev/sound/pcm/buffer.c
-index de535ec2d..0612271e7 100644
+index de535ec2dcba..0612271e74c8 100644
 --- a/sys/dev/sound/pcm/buffer.c
 +++ b/sys/dev/sound/pcm/buffer.c
 @@ -558,7 +558,9 @@ sndbuf_xbytes(unsigned int v, struct snd_dbuf *from, struct snd_dbuf *to)
@@ -14,7 +14,7 @@ index de535ec2d..0612271e7 100644
 	else if (fmt & AFMT_MU_LAW)
 		return (0x7f);
 diff --git a/sys/dev/sound/pcm/channel.c b/sys/dev/sound/pcm/channel.c
-index 4d13f20a5..a0a7baf63 100644
+index 4d13f20a5262..a0a7baf63012 100644
 --- a/sys/dev/sound/pcm/channel.c
 +++ b/sys/dev/sound/pcm/channel.c
 @@ -964,6 +964,7 @@ static const struct {
@@ -73,7 +73,7 @@ index 4d13f20a5..a0a7baf63 100644
 			*vchanformat = bestformat;
 			*vchanrate = bestspeed;
 diff --git a/sys/dev/sound/pcm/dsp.c b/sys/dev/sound/pcm/dsp.c
-index fe5576baf..18b4dda1a 100644
+index fe5576baf017..18b4dda1af94 100644
 --- a/sys/dev/sound/pcm/dsp.c
 +++ b/sys/dev/sound/pcm/dsp.c
 @@ -1271,6 +1271,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
@@ -104,7 +104,7 @@ index fe5576baf..18b4dda1a 100644
 				ret = EINVAL;
 			CHN_UNLOCK(chn);
 diff --git a/sys/dev/sound/pcm/feeder.c b/sys/dev/sound/pcm/feeder.c
-index af3ada441..b47e73140 100644
+index af3ada441e48..b47e73140217 100644
 --- a/sys/dev/sound/pcm/feeder.c
 +++ b/sys/dev/sound/pcm/feeder.c
 @@ -291,6 +291,8 @@ snd_fmtscore(u_int32_t fmt)
@@ -141,7 +141,7 @@ index af3ada441..b47e73140 100644
 				    score_cse(score) == score_cse(score2) ||
 				    ((score_cse(oldscore) != score_cse(score) &&
 diff --git a/sys/dev/sound/pcm/feeder_chain.c b/sys/dev/sound/pcm/feeder_chain.c
-index 56de32441..a5cb2048c 100644
+index 56de32441de7..a5cb2048c66b 100644
 --- a/sys/dev/sound/pcm/feeder_chain.c
 +++ b/sys/dev/sound/pcm/feeder_chain.c
 @@ -530,21 +530,28 @@ feeder_build_mixer(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
@@ -291,7 +291,7 @@ index 56de32441..a5cb2048c 100644
 	chn_syncstate(c);
 
 diff --git a/sys/dev/sound/pcm/feeder_format.c b/sys/dev/sound/pcm/feeder_format.c
-index 0feac4337..9a98d3252 100644
+index 0feac43374b8..9a98d325223a 100644
 --- a/sys/dev/sound/pcm/feeder_format.c
 +++ b/sys/dev/sound/pcm/feeder_format.c
 @@ -47,7 +47,34 @@
@@ -388,7 +388,7 @@ index 0feac4337..9a98d3252 100644
 			src += info->ibps;
 		} while (--j != 0);
 diff --git a/sys/dev/sound/pcm/pcm.h b/sys/dev/sound/pcm/pcm.h
-index 7d0a8f0f4..0f9636039 100644
+index 7d0a8f0f431b..0f9636039a6c 100644
 --- a/sys/dev/sound/pcm/pcm.h
 +++ b/sys/dev/sound/pcm/pcm.h
 @@ -100,6 +100,7 @@ typedef uint64_t uintpcm64_t;
@@ -400,7 +400,7 @@ index 7d0a8f0f4..0f9636039 100644
  #define INTPCM_T(v)	((intpcm_t)(v))
  #define INTPCM8_T(v)	((intpcm8_t)(v))
 diff --git a/sys/dev/sound/pcm/sound.c b/sys/dev/sound/pcm/sound.c
-index cb510d526..2a5f8805a 100644
+index cb510d526fa8..2a5f8805a245 100644
 --- a/sys/dev/sound/pcm/sound.c
 +++ b/sys/dev/sound/pcm/sound.c
 @@ -327,6 +327,42 @@ sysctl_dev_pcm_bitperfect(SYSCTL_HANDLER_ARGS)
@@ -459,7 +459,7 @@ index cb510d526..2a5f8805a 100644
 	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
 	    "mode", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE, d, sizeof(d),
 diff --git a/sys/dev/sound/pcm/sound.h b/sys/dev/sound/pcm/sound.h
-index 6bd435d0e..e0d93ee2e 100644
+index 6bd435d0ea25..e0d93ee2ecc0 100644
 --- a/sys/dev/sound/pcm/sound.h
 +++ b/sys/dev/sound/pcm/sound.h
 @@ -116,6 +116,7 @@ struct snd_mixer;
@@ -503,7 +503,7 @@ index 6bd435d0e..e0d93ee2e 100644
  #define AFMT_BPS(v)		(AFMT_BIT(v) >> 3)
  #define AFMT_ALIGN(v)		(AFMT_BPS(v) * AFMT_CHANNEL(v))
 diff --git a/sys/dev/sound/pcm/vchan.c b/sys/dev/sound/pcm/vchan.c
-index 31a4f7db8..e62d300ce 100644
+index 31a4f7db8d70..e62d300ce8e1 100644
 --- a/sys/dev/sound/pcm/vchan.c
 +++ b/sys/dev/sound/pcm/vchan.c
 @@ -41,10 +41,11 @@
@@ -567,7 +567,7 @@ index 31a4f7db8..e62d300ce 100644
 		info->caps.fmtlist = info->fmtlist + FMTLIST_OFFSET;
 		if (pformat & AFMT_VCHAN)
 diff --git a/sys/dev/sound/usb/uaudio.c b/sys/dev/sound/usb/uaudio.c
-index ff9f59fe4..37318b22c 100644
+index ff9f59fe42ab..37318b22c025 100644
 --- a/sys/dev/sound/usb/uaudio.c
 +++ b/sys/dev/sound/usb/uaudio.c
 @@ -213,7 +213,7 @@ struct uaudio_configure_msg {
@@ -971,7 +971,7 @@ index ff9f59fe4..37318b22c 100644
  uaudio20_set_speed(struct usb_device *udev, uint8_t iface_no,
      uint8_t clockid, uint32_t speed)
 diff --git a/sys/dev/sound/usb/uaudio.h b/sys/dev/sound/usb/uaudio.h
-index 54b31a4e7..7b1b18af0 100644
+index 54b31a4e7bd2..7b1b18af0c91 100644
 --- a/sys/dev/sound/usb/uaudio.h
 +++ b/sys/dev/sound/usb/uaudio.h
 @@ -43,6 +43,7 @@ extern int	uaudio_detach_sub(device_t dev);
@@ -983,7 +983,7 @@ index 54b31a4e7..7b1b18af0 100644
 		    uint32_t blocksize);
  extern int	uaudio_chan_set_param_fragments(struct uaudio_chan *ch,
 diff --git a/sys/dev/sound/usb/uaudio_pcm.c b/sys/dev/sound/usb/uaudio_pcm.c
-index 0b3da9b20..18ba6e8b6 100644
+index 0b3da9b20440..18ba6e8b6fb2 100644
 --- a/sys/dev/sound/usb/uaudio_pcm.c
 +++ b/sys/dev/sound/usb/uaudio_pcm.c
 @@ -49,6 +49,12 @@ ua_chan_free(kobj_t obj, void *data)
@@ -1008,7 +1008,7 @@ index 0b3da9b20..18ba6e8b6 100644
 	KOBJMETHOD(channel_setspeed, ua_chan_setspeed),
 	KOBJMETHOD(channel_setblocksize, ua_chan_setblocksize),
 diff --git a/sys/dev/sound/usb/uaudioreg.h b/sys/dev/sound/usb/uaudioreg.h
-index aba07cf3c..c7675ccac 100644
+index aba07cf3c773..c7675ccac530 100644
 --- a/sys/dev/sound/usb/uaudioreg.h
 +++ b/sys/dev/sound/usb/uaudioreg.h
 @@ -782,6 +782,7 @@ struct usb_audio20_cluster {
@@ -1028,7 +1028,7 @@ index aba07cf3c..c7675ccac 100644
 
  #endif					/* _UAUDIOREG_H_ */
 diff --git a/sys/sys/soundcard.h b/sys/sys/soundcard.h
-index aab675325..d57cffaaa 100644
+index aab67532503e..d57cffaaacc1 100644
 --- a/sys/sys/soundcard.h
 +++ b/sys/sys/soundcard.h
 @@ -170,6 +170,7 @@ struct snd_size {
