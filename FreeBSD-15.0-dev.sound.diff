@@ -1,0 +1,1041 @@
+diff --git a/sys/dev/sound/pcm/buffer.c b/sys/dev/sound/pcm/buffer.c
+index de535ec2dcba..0612271e74c8 100644
+--- a/sys/dev/sound/pcm/buffer.c
++++ b/sys/dev/sound/pcm/buffer.c
+@@ -558,7 +558,9 @@ sndbuf_xbytes(unsigned int v, struct snd_dbuf *from, struct snd_dbuf *to)
+ u_int8_t
+ sndbuf_zerodata(u_int32_t fmt)
+ {
+-	if (fmt & (AFMT_SIGNED | AFMT_PASSTHROUGH))
++	if (fmt & AFMT_DSD)
++		return (0xaa);
++	else if (fmt & (AFMT_SIGNED | AFMT_PASSTHROUGH))
+		return (0x00);
+	else if (fmt & AFMT_MU_LAW)
+		return (0x7f);
+diff --git a/sys/dev/sound/pcm/channel.c b/sys/dev/sound/pcm/channel.c
+index 4d13f20a5262..a0a7baf63012 100644
+--- a/sys/dev/sound/pcm/channel.c
++++ b/sys/dev/sound/pcm/channel.c
+@@ -964,6 +964,7 @@ static const struct {
+	{    "u8",   "8", NULL, AFMT_U8     },
+	{    "s8",  NULL, NULL, AFMT_S8     },
+	{   "ac3",  NULL, NULL, AFMT_AC3    },
++	{   "dsd",  NULL, NULL, AFMT_DSD    },
+ #if BYTE_ORDER == LITTLE_ENDIAN
+	{ "s16le", "s16", "16", AFMT_S16_LE },
+	{ "s16be",  NULL, NULL, AFMT_S16_BE },
+@@ -2372,8 +2373,10 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+ {
+	struct pcm_channel *ch;
+	struct pcmchan_caps *caps;
++	struct snddev_info *d;
+	uint32_t bestformat, bestspeed, besthwformat, *vchanformat, *vchanrate;
+	uint32_t vpflags;
++	uint32_t oldformat;
+	int dirty, err, run, nrun;
+
+	CHN_LOCKASSERT(c);
+@@ -2432,6 +2435,8 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+	}
+
+	if (flags & CHN_N_TRIGGER) {
++		oldformat = c->format;
++		d = c->parentsnddev;
+		if (c->direction == PCMDIR_PLAY) {
+			vchanformat = &c->parentsnddev->pvchanformat;
+			vchanrate = &c->parentsnddev->pvchanrate;
+@@ -2459,8 +2464,16 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+			CHN_LOCK(ch);
+			if ((ch->format & AFMT_PASSTHROUGH) &&
+			    snd_fmtvalid(ch->format, caps->fmtlist)) {
+-				bestformat = ch->format;
+-				bestspeed = ch->speed;
++				if (ch->format & AFMT_DSD
++				    && d->flags & SD_F_DSD_TO_DOP) {
++					oldformat = ch->format;
++					bestspeed = ch->speed * 2;
++					bestformat = SND_FORMAT(AFMT_S24_LE,2,0);
++				}
++				else {
++					bestspeed = ch->speed;
++					bestformat = ch->format;
++				}
+				CHN_UNLOCK(ch);
+				vpflags = CHN_F_PASSTHROUGH;
+				nrun++;
+@@ -2561,6 +2574,7 @@ chn_notify(struct pcm_channel *c, u_int32_t flags)
+		}
+
+		if (err == 0 && !(bestformat & AFMT_PASSTHROUGH) &&
++		    !(oldformat & AFMT_DSD && d->flags & SD_F_DSD_TO_DOP) &&
+		    (bestformat & AFMT_VCHAN)) {
+			*vchanformat = bestformat;
+			*vchanrate = bestspeed;
+diff --git a/sys/dev/sound/pcm/dsp.c b/sys/dev/sound/pcm/dsp.c
+index fe5576baf017..18b4dda1af94 100644
+--- a/sys/dev/sound/pcm/dsp.c
++++ b/sys/dev/sound/pcm/dsp.c
+@@ -1271,6 +1271,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
+				    AFMT_CHANNEL(wrch->format),
+				    AFMT_EXTCHANNEL(wrch->format)));
+				tmp = wrch->format;
++				if (tmp & AFMT_DSD)
++					wrch->flags |= CHN_F_BITPERFECT;
+				CHN_UNLOCK(wrch);
+			}
+			if (rdch && ret == 0) {
+@@ -1280,6 +1282,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
+				    AFMT_EXTCHANNEL(rdch->format)));
+				if (tmp == 0)
+					tmp = rdch->format;
++				if (tmp & AFMT_DSD)
++					rdch->flags |= CHN_F_BITPERFECT;
+				CHN_UNLOCK(rdch);
+			}
+			PCM_RELEASE_QUICK(d);
+@@ -1437,6 +1441,8 @@ dsp_ioctl(struct cdev *i_dev, u_long cmd, caddr_t arg, int mode,
+				*arg_i = 24;
+			else if (chn->format & AFMT_32BIT)
+				*arg_i = 32;
++			else if (chn->format & AFMT_DSD)
++				*arg_i = 32;
+			else
+				ret = EINVAL;
+			CHN_UNLOCK(chn);
+diff --git a/sys/dev/sound/pcm/feeder.c b/sys/dev/sound/pcm/feeder.c
+index af3ada441e48..b47e73140217 100644
+--- a/sys/dev/sound/pcm/feeder.c
++++ b/sys/dev/sound/pcm/feeder.c
+@@ -291,6 +291,8 @@ snd_fmtscore(u_int32_t fmt)
+		ret |= 1 << 12;
+	else if (fmt & AFMT_32BIT)
+		ret |= 1 << 13;
++	else if (fmt & AFMT_DSD)
++		ret |= 1 << 14;
+
+	return ret;
+ }
+@@ -317,14 +319,15 @@ snd_fmtbestfunc(u_int32_t fmt, u_int32_t *fmts, int cheq)
+		    (oldscore != 0 && score_chgt(score2, oldscore))))
+				continue;
+		if (oldscore == 0 ||
+-			    (score_val(score2) == score_val(score)) ||
+-			    (score_val(score2) == score_val(oldscore)) ||
+-			    (score_val(score2) > score_val(oldscore) &&
+-			    score_val(score2) < score_val(score)) ||
+-			    (score_val(score2) < score_val(oldscore) &&
+-			    score_val(score2) > score_val(score)) ||
+-			    (score_val(oldscore) < score_val(score) &&
+-			    score_val(score2) > score_val(oldscore))) {
++		    (score_val(score2) == score_val(score)) ||
++		    (AFMT_ENCODING(fmt) != AFMT_DSD &&
++		    AFMT_ENCODING(fmts[i]) != AFMT_DSD &&
++		    ((score_val(score2) > score_val(oldscore) &&
++		    score_val(score2) < score_val(score)) ||
++		    (score_val(score2) < score_val(oldscore) &&
++		    score_val(score2) > score_val(score)) ||
++		    (score_val(oldscore) < score_val(score) &&
++		    score_val(score2) > score_val(oldscore))))) {
+			if (score_val(oldscore) != score_val(score2) ||
+				    score_cse(score) == score_cse(score2) ||
+				    ((score_cse(oldscore) != score_cse(score) &&
+diff --git a/sys/dev/sound/pcm/feeder_chain.c b/sys/dev/sound/pcm/feeder_chain.c
+index 56de32441de7..a5cb2048c66b 100644
+--- a/sys/dev/sound/pcm/feeder_chain.c
++++ b/sys/dev/sound/pcm/feeder_chain.c
+@@ -530,21 +530,28 @@ feeder_build_mixer(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
+ /* Macrosses to ease our job doing stuffs later. */
+ #define FEEDER_BW(c, t)		((c)->t.matrix->channels * (c)->t.rate)
+
+-#define FEEDRATE_UP(c)		((c)->target.rate > (c)->current.rate)
+-#define FEEDRATE_DOWN(c)	((c)->target.rate < (c)->current.rate)
++#define FEEDRATE_UP(c)		(AFMT_ENCODING((c)->origin.afmt)!=AFMT_DSD && \
++				 (c)->target.rate > (c)->current.rate)
++#define FEEDRATE_DOWN(c)	(AFMT_ENCODING((c)->origin.afmt)!=AFMT_DSD && \
++				 (c)->target.rate < (c)->current.rate)
+ #define FEEDRATE_REQUIRED(c)	(FEEDRATE_UP(c) || FEEDRATE_DOWN(c))
+
+-#define FEEDMATRIX_UP(c)	((c)->target.matrix->channels >		\
++#define FEEDMATRIX_UP(c)	(AFMT_ENCODING((c)->origin.afmt)!=AFMT_DSD && \
++				 (c)->target.matrix->channels >		\
+				 (c)->current.matrix->channels)
+-#define FEEDMATRIX_DOWN(c)	((c)->target.matrix->channels <		\
++#define FEEDMATRIX_DOWN(c)	(AFMT_ENCODING((c)->origin.afmt)!=AFMT_DSD && \
++				 (c)->target.matrix->channels <		\
+				 (c)->current.matrix->channels)
+ #define FEEDMATRIX_REQUIRED(c)	(FEEDMATRIX_UP(c) ||			\
+-				 FEEDMATRIX_DOWN(c) || (c)->use_matrix != 0)
++				 FEEDMATRIX_DOWN(c) ||			\
++				 (AFMT_ENCODING((c)->origin.afmt)!=AFMT_DSD && \
++				  (c)->use_matrix != 0))
+
+ #define FEEDFORMAT_REQUIRED(c)	(AFMT_ENCODING((c)->current.afmt) !=	\
+				 AFMT_ENCODING((c)->target.afmt))
+
+-#define FEEDVOLUME_REQUIRED(c)	((c)->use_volume != 0)
++#define FEEDVOLUME_REQUIRED(c)	(AFMT_ENCODING((c)->origin.afmt)!=AFMT_DSD && \
++				 (c)->use_volume != 0)
+
+ #define FEEDEQ_VALIDRATE(c, t)	(feeder_eq_validrate((c)->t.rate) != 0)
+ #define FEEDEQ_ECONOMY(c)	(FEEDER_BW(c, current) < FEEDER_BW(c, target))
+@@ -553,15 +560,15 @@ feeder_build_mixer(struct pcm_channel *c, struct feeder_chain_desc *cdesc)
+
+ #define FEEDFORMAT_NE_REQUIRED(c)					\
+	((c)->afmt_ne != AFMT_S32_NE &&					\
+-	(((c)->mode == FEEDER_CHAIN_16 &&				\
+-	AFMT_ENCODING((c)->current.afmt) != AFMT_S16_NE) ||		\
+-	((c)->mode == FEEDER_CHAIN_32 &&				\
+-	AFMT_ENCODING((c)->current.afmt) != AFMT_S32_NE) ||		\
+-	(c)->mode == FEEDER_CHAIN_FULLMULTI ||				\
+-	((c)->mode == FEEDER_CHAIN_MULTI &&				\
+-	((c)->current.afmt & AFMT_8BIT)) ||				\
+-	((c)->mode == FEEDER_CHAIN_LEAN &&				\
+-	!((c)->current.afmt & (AFMT_S16_NE | AFMT_S32_NE)))))
++	 (((c)->mode == FEEDER_CHAIN_16 &&				\
++	   AFMT_ENCODING((c)->current.afmt) != AFMT_S16_NE) ||		\
++	  ((c)->mode == FEEDER_CHAIN_32 &&				\
++	   AFMT_ENCODING((c)->current.afmt) != AFMT_S32_NE) ||		\
++	  (c)->mode == FEEDER_CHAIN_FULLMULTI ||			\
++	  ((c)->mode == FEEDER_CHAIN_MULTI &&				\
++	   ((c)->current.afmt & AFMT_8BIT)) ||				\
++	  ((c)->mode == FEEDER_CHAIN_LEAN &&				\
++	   !((c)->current.afmt & (AFMT_S16_NE | AFMT_S32_NE)))))
+
+ static void
+ feeder_default_matrix(struct pcmchan_matrix *m, uint32_t fmt, int id)
+@@ -585,6 +592,7 @@ feeder_chain(struct pcm_channel *c)
+	struct feeder_chain_desc cdesc;
+	struct pcmchan_matrix *hwmatrix, *softmatrix;
+	uint32_t hwfmt, softfmt;
++	uint32_t hwspd;
+	int ret;
+
+	CHN_LOCKASSERT(c);
+@@ -621,8 +629,10 @@ feeder_chain(struct pcm_channel *c)
+				 (CHN_F_VIRTUAL | CHN_F_PASSTHROUGH))
+
+	/* Get the best possible hardware format. */
+-	if (VCHAN_PASSTHROUGH(c))
++	if (VCHAN_PASSTHROUGH(c)) {
+		hwfmt = c->parentchannel->format;
++		hwspd = c->parentchannel->speed;
++	}
+	else {
+		caps = chn_getcaps(c);
+		if (caps == NULL || caps->fmtlist == NULL) {
+@@ -635,6 +645,7 @@ feeder_chain(struct pcm_channel *c)
+		    !snd_fmtvalid(c->format, caps->fmtlist))
+			return (ENODEV);
+
++		hwspd = sndbuf_getspd(c->bufhard);
+		hwfmt = snd_fmtbest(c->format, caps->fmtlist);
+		if (hwfmt == 0 || !snd_fmtvalid(hwfmt, caps->fmtlist)) {
+			device_printf(c->dev,
+@@ -686,16 +697,33 @@ feeder_chain(struct pcm_channel *c)
+		    "%s(): WARNING: %s Soft format 0x%08x -> 0x%08x\n",
+		    __func__, CHN_DIRSTR(c), c->format, softfmt);
+
++	d = c->parentsnddev;
++
+	/*
+	 * PLAY and REC are opposite.
+	 */
+	if (c->direction == PCMDIR_PLAY) {
+-		cdesc.origin.afmt    = softfmt;
+-		cdesc.origin.matrix  = softmatrix;
+-		cdesc.origin.rate    = c->speed;
+-		cdesc.target.afmt    = hwfmt;
+-		cdesc.target.matrix  = hwmatrix;
+-		cdesc.target.rate    = sndbuf_getspd(c->bufhard);
++		if (d->flags & SD_F_DSD_TO_DOP
++		    && AFMT_ENCODING(c->format) == AFMT_DSD) {
++			struct pcmchan_caps *caps;
++			caps = chn_getcaps(c);
++			cdesc.origin.afmt    = c->format;
++			cdesc.origin.matrix  = softmatrix;
++			cdesc.origin.rate    = c->speed;
++			hwfmt	= SND_FORMAT(AFMT_S24_LE,2,0);
++			hwspd	= c->speed * 2;
++			RANGE(hwspd, caps->minspeed, caps->maxspeed);
++			cdesc.target.afmt    = hwfmt;
++			cdesc.target.matrix  = hwmatrix;
++			cdesc.target.rate    = hwspd;
++		} else {
++			cdesc.origin.afmt    = softfmt;
++			cdesc.origin.matrix  = softmatrix;
++			cdesc.origin.rate    = c->speed;
++			cdesc.target.afmt    = hwfmt;
++			cdesc.target.matrix  = hwmatrix;
++			cdesc.target.rate    = hwspd;
++		}
+	} else {
+		cdesc.origin.afmt    = hwfmt;
+		cdesc.origin.matrix  = hwmatrix;
+@@ -712,7 +740,8 @@ feeder_chain(struct pcm_channel *c)
+	 * that 'origin' and 'target' identical, skipping mostly chain
+	 * procedures.
+	 */
+-	if (CHN_BITPERFECT(c) || (c->format & AFMT_PASSTHROUGH)) {
++	if (CHN_BITPERFECT(c) || (c->format & AFMT_AC3) ||
++	    ((c->format & AFMT_DSD) && !(d->flags & SD_F_DSD_TO_DOP))) {
+		if (c->direction == PCMDIR_PLAY)
+			cdesc.origin = cdesc.target;
+		else
+@@ -862,6 +891,7 @@ feeder_chain(struct pcm_channel *c)
+	sndbuf_setspd(c->bufsoft, c->speed);
+
+	sndbuf_setfmt(c->bufhard, hwfmt);
++	sndbuf_setspd(c->bufhard, hwspd);
+
+	chn_syncstate(c);
+
+diff --git a/sys/dev/sound/pcm/feeder_format.c b/sys/dev/sound/pcm/feeder_format.c
+index 0feac43374b8..9a98d325223a 100644
+--- a/sys/dev/sound/pcm/feeder_format.c
++++ b/sys/dev/sound/pcm/feeder_format.c
+@@ -47,7 +47,34 @@
+ #include "snd_fxdiv_gen.h"
+ #endif
+
+-#define FEEDFORMAT_RESERVOIR	(SND_CHN_MAX * PCM_32_BPS)
++#define FEEDFORMAT_RESERVOIR	(SND_CHN_MAX * PCM_48_BPS)
++
++
++static __inline uint64_t
++dsd_read_64le(const uint8_t *src)
++{
++	return ((uint64_t)src[0] | ((uint64_t)src[1] << 8) |
++	    ((uint64_t)src[2] << 16) | ((uint64_t)src[3] << 24) |
++	    ((uint64_t)src[4] << 32) | ((uint64_t)src[5] << 40) |
++	    ((uint64_t)src[6] << 48) | ((uint64_t)src[7] << 56));
++}
++
++static __inline void
++dsd_write_dop64to96le(uint8_t *dst, uint64_t v)
++{
++	dst[0] = v & 0xff;
++	dst[1] = (v >> 8) & 0xff;
++	dst[2] = 0x05;
++	dst[3] = (v >> 32) & 0xff;
++	dst[4] = (v >> 40) & 0xff;
++	dst[5] = 0x05;
++	dst[6] = (v >> 16) & 0xff;
++	dst[7] = (v >> 24) & 0xff;
++	dst[8] = 0xfa;
++	dst[9] = (v >> 48) & 0xff;
++	dst[10] = (v >> 56) & 0xff;
++	dst[11] = 0xfa;
++}
+
+ struct feed_format_info {
+	uint32_t ibps, obps;
+@@ -61,7 +88,9 @@ feed_format_init(struct pcm_feeder *f)
+ {
+	struct feed_format_info *info;
+
+-	if (f->desc->in == f->desc->out ||
++	if (f->desc->in == f->desc->out)
++		return (EINVAL);
++	if (AFMT_ENCODING(f->desc->in) != AFMT_DSD &&
+	    AFMT_CHANNEL(f->desc->in) != AFMT_CHANNEL(f->desc->out))
+		return (EINVAL);
+
+@@ -69,15 +98,21 @@ feed_format_init(struct pcm_feeder *f)
+	if (info == NULL)
+		return (ENOMEM);
+
+-	info->channels = AFMT_CHANNEL(f->desc->in);
+-
+-	info->ibps = AFMT_BPS(f->desc->in);
+-	info->ialign = info->ibps * info->channels;
+	info->rdfmt = AFMT_ENCODING(f->desc->in);
+-
+-	info->obps = AFMT_BPS(f->desc->out);
+-	info->oalign = info->obps * info->channels;
+	info->wrfmt = AFMT_ENCODING(f->desc->out);
++	if (info->rdfmt == AFMT_DSD) {
++		info->channels = 1;
++		info->ibps = 8;
++		info->ialign = info->ibps;
++		info->obps = 12;
++		info->oalign = info->obps;
++	} else {
++		info->channels = AFMT_CHANNEL(f->desc->in);
++		info->ibps = AFMT_BPS(f->desc->in);
++		info->ialign = info->ibps * info->channels;
++		info->obps = AFMT_BPS(f->desc->out);
++		info->oalign = info->obps * info->channels;
++	}
+
+	f->data = info;
+
+@@ -161,8 +196,14 @@ feed_format_feed(struct pcm_feeder *f, struct pcm_channel *c, uint8_t *b,
+		count -= j * info->obps;
+
+		do {
+-			v = pcm_sample_read_norm(src, info->rdfmt);
+-			pcm_sample_write_norm(dst, v, info->wrfmt);
++			if (info->rdfmt == AFMT_DSD) {
++				uint64_t v_dsd;
++				v_dsd = dsd_read_64le(src);
++				dsd_write_dop64to96le(dst, v_dsd);
++			} else {
++				v = pcm_sample_read_norm(src, info->rdfmt);
++				pcm_sample_write_norm(dst, v, info->wrfmt);
++			}
+			dst += info->obps;
+			src += info->ibps;
+		} while (--j != 0);
+diff --git a/sys/dev/sound/pcm/pcm.h b/sys/dev/sound/pcm/pcm.h
+index 7d0a8f0f431b..0f9636039a6c 100644
+--- a/sys/dev/sound/pcm/pcm.h
++++ b/sys/dev/sound/pcm/pcm.h
+@@ -100,6 +100,7 @@ typedef uint64_t uintpcm64_t;
+ #define PCM_16_BPS	2
+ #define PCM_24_BPS	3
+ #define PCM_32_BPS	4
++#define PCM_48_BPS	6
+
+ #define INTPCM_T(v)	((intpcm_t)(v))
+ #define INTPCM8_T(v)	((intpcm8_t)(v))
+diff --git a/sys/dev/sound/pcm/sound.c b/sys/dev/sound/pcm/sound.c
+index cb510d526fa8..2a5f8805a245 100644
+--- a/sys/dev/sound/pcm/sound.c
++++ b/sys/dev/sound/pcm/sound.c
+@@ -327,6 +327,42 @@ sysctl_dev_pcm_bitperfect(SYSCTL_HANDLER_ARGS)
+	return (err);
+ }
+
++
++static int
++sysctl_dev_pcm_dsd_to_dop(SYSCTL_HANDLER_ARGS)
++{
++	struct snddev_info *d;
++	int err, val;
++
++	d = oidp->oid_arg1;
++	if (!PCM_REGISTERED(d))
++		return (ENODEV);
++
++	PCM_LOCK(d);
++	PCM_WAIT(d);
++	val = (d->flags & SD_F_DSD_TO_DOP) ? 1 : 0;
++	PCM_ACQUIRE(d);
++	PCM_UNLOCK(d);
++
++	err = sysctl_handle_int(oidp, &val, 0, req);
++
++	if (err == 0 && req->newptr != NULL) {
++		if (!(val == 0 || val == 1)) {
++			PCM_RELEASE_QUICK(d);
++			return (EINVAL);
++		}
++
++		PCM_LOCK(d);
++		d->flags &= ~SD_F_DSD_TO_DOP;
++		d->flags |= (val != 0) ? SD_F_DSD_TO_DOP : 0;
++		PCM_RELEASE(d);
++		PCM_UNLOCK(d);
++	} else
++		PCM_RELEASE_QUICK(d);
++
++	return (err);
++}
++
+ static int
+ sysctl_dev_pcm_mode(SYSCTL_HANDLER_ARGS)
+ {
+@@ -438,6 +474,11 @@ pcm_register(device_t dev, char *str)
+	    "bitperfect", CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE, d,
+	    sizeof(d), sysctl_dev_pcm_bitperfect, "I",
+	    "bit-perfect playback/recording (0=disable, 1=enable)");
++	SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
++	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
++	    "dsd_to_dop", CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_MPSAFE, d,
++	    sizeof(d), sysctl_dev_pcm_dsd_to_dop, "I",
++	    "playback DSD as DoP (0=disable, 1=enable)");
+	SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
+	    SYSCTL_CHILDREN(device_get_sysctl_tree(dev)), OID_AUTO,
+	    "mode", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE, d, sizeof(d),
+diff --git a/sys/dev/sound/pcm/sound.h b/sys/dev/sound/pcm/sound.h
+index 6bd435d0ea25..e0d93ee2ecc0 100644
+--- a/sys/dev/sound/pcm/sound.h
++++ b/sys/dev/sound/pcm/sound.h
+@@ -116,6 +116,7 @@ struct snd_mixer;
+ #define SD_F_EQ_PC		0x00000800	/* EQ per-channel */
+ #define SD_F_PVCHANS		0x00001000	/* Playback vchans enabled */
+ #define SD_F_RVCHANS		0x00002000	/* Recording vchans enabled */
++#define SD_F_DSD_TO_DOP		0x00004000	/* Convert DSD to DoP */
+
+ #define SD_F_EQ_DEFAULT		(SD_F_EQ | SD_F_EQ_ENABLED)
+ #define SD_F_EQ_MASK		(SD_F_EQ | SD_F_EQ_ENABLED |		\
+@@ -135,7 +136,8 @@ struct snd_mixer;
+				"\013EQ_BYPASSED"			\
+				"\014EQ_PC"				\
+				"\015PVCHANS"				\
+-				"\016RVCHANS"
++				"\016RVCHANS"				\
++				"\017DSD_TO_DOP"
+
+ #define PCM_ALIVE(x)		((x) != NULL && (x)->lock != NULL)
+ #define PCM_REGISTERED(x)	(PCM_ALIVE(x) && ((x)->flags & SD_F_REGISTERED))
+@@ -456,7 +458,7 @@ int	sound_oss_card_info(oss_card_info *);
+ /* Supported vchan mixing formats */
+ #define AFMT_VCHAN		(AFMT_CONVERTIBLE & ~AFMT_G711)
+
+-#define AFMT_PASSTHROUGH		AFMT_AC3
++#define AFMT_PASSTHROUGH		(AFMT_AC3|AFMT_DSD)
+ #define AFMT_PASSTHROUGH_RATE		48000
+ #define AFMT_PASSTHROUGH_CHANNEL	2
+ #define AFMT_PASSTHROUGH_EXTCHANNEL	0
+@@ -481,10 +483,10 @@ int	sound_oss_card_info(oss_card_info *);
+ #define AFMT_CHANNEL(v)		(((v) & AFMT_CHANNEL_MASK) >>		\
+				AFMT_CHANNEL_SHIFT)
+
+-#define AFMT_BIT(v)		(((v) & AFMT_32BIT) ? 32 :		\
++#define AFMT_BIT(v)		(((v) & (AFMT_32BIT|AFMT_DSD)) ? 32 :	\
+				(((v) & AFMT_24BIT) ? 24 :		\
+				((((v) & AFMT_16BIT) ||			\
+-				((v) & AFMT_PASSTHROUGH)) ? 16 : 8)))
++				((v) & AFMT_AC3)) ? 16 : 8)))
+
+ #define AFMT_BPS(v)		(AFMT_BIT(v) >> 3)
+ #define AFMT_ALIGN(v)		(AFMT_BPS(v) * AFMT_CHANNEL(v))
+diff --git a/sys/dev/sound/pcm/vchan.c b/sys/dev/sound/pcm/vchan.c
+index 31a4f7db8d70..e62d300ce8e1 100644
+--- a/sys/dev/sound/pcm/vchan.c
++++ b/sys/dev/sound/pcm/vchan.c
+@@ -41,10 +41,11 @@
+ #include <dev/sound/pcm/vchan.h>
+
+ /*
+- * [ac3 , dts , linear , 0, linear, 0]
++ * [ac3, dsd, linear..., 0, linear..., 0]
+  */
+-#define FMTLIST_MAX		6
+-#define FMTLIST_OFFSET		4
++#define FMTLIST_MAX		9
++#define FMTLIST_OFFSET		7
++#define LINEARFMTS_MAX		6
+ #define DIGFMTS_MAX		2
+
+ #ifdef SND_DEBUG
+@@ -88,6 +89,10 @@ vchan_init(kobj_t obj, void *devinfo, struct snd_dbuf *b,
+		if (fmtlist[i] & AFMT_PASSTHROUGH)
+			info->fmtlist[j++] = fmtlist[i];
+	}
++	for (i = 0; fmtlist[i] != 0 && j < FMTLIST_OFFSET; i++) {
++		if (!(fmtlist[i] & AFMT_PASSTHROUGH))
++			info->fmtlist[j++] = fmtlist[i];
++	}
+	if (p->format & AFMT_VCHAN)
+		info->fmtlist[j] = p->format;
+	else
+@@ -192,10 +197,12 @@ vchan_getcaps(kobj_t obj, void *data)
+ {
+	struct vchan_info *info;
+	struct pcm_channel *c;
++	struct snddev_info *d;
+	uint32_t pformat, pspeed, pflags, i;
+
+	info = data;
+	c = info->channel;
++	d = c->parentsnddev;
+	pformat = c->parentchannel->format;
+	pspeed = c->parentchannel->speed;
+	pflags = c->parentchannel->flags;
+@@ -212,11 +219,17 @@ vchan_getcaps(kobj_t obj, void *data)
+			}
+			info->caps.fmtlist[i] = pformat;
+		}
+-		if (c->format & AFMT_PASSTHROUGH)
++		if (c->format & AFMT_PASSTHROUGH) {
+			info->caps.minspeed = c->speed;
+-		else
++			if ((c->format & AFMT_DSD) &&
++			    (d->flags & SD_F_DSD_TO_DOP))
++				info->caps.maxspeed = c->speed * 2;
++			else
++				info->caps.maxspeed = c->speed;
++		} else {
+			info->caps.minspeed = pspeed;
+-		info->caps.maxspeed = info->caps.minspeed;
++			info->caps.maxspeed = info->caps.minspeed;
++		}
+	} else {
+		info->caps.fmtlist = info->fmtlist + FMTLIST_OFFSET;
+		if (pformat & AFMT_VCHAN)
+diff --git a/sys/dev/sound/usb/uaudio.c b/sys/dev/sound/usb/uaudio.c
+index ff9f59fe42ab..37318b22c025 100644
+--- a/sys/dev/sound/usb/uaudio.c
++++ b/sys/dev/sound/usb/uaudio.c
+@@ -213,7 +213,7 @@ struct uaudio_configure_msg {
+	struct uaudio_softc *sc;
+ };
+
+-#define	CHAN_MAX_ALT 24
++#define	CHAN_MAX_ALT 64
+
+ struct uaudio_chan_alt {
+	union uaudio_asf1d p_asf1d;
+@@ -253,7 +253,8 @@ struct uaudio_chan {
+
+	int feedback_rate;
+
+-	uint32_t pcm_format[2];
++	uint32_t pcm_format_count;
++	uint32_t pcm_format[CHAN_MAX_ALT+1];
+
+	uint16_t bytes_per_frame[2];
+
+@@ -426,7 +427,7 @@ struct uaudio_terminal_node {
+ };
+
+ struct uaudio_format {
+-	uint16_t wFormat;
++	uint32_t wFormat;
+	uint8_t	bPrecision;
+	uint32_t freebsd_fmt;
+	const char *description;
+@@ -445,6 +446,8 @@ static const struct uaudio_format uaudio10_formats[] = {
+
+	{UA_FMT_ALAW, 8, AFMT_A_LAW, "8-bit A-Law"},
+	{UA_FMT_MULAW, 8, AFMT_MU_LAW, "8-bit mu-Law"},
++
++	/* {UA_FMT_RAW, 32, AFMT_DSD, "1-bit DSD"}, */
+	{0, 0, 0, NULL}
+ };
+
+@@ -461,6 +464,8 @@ static const struct uaudio_format uaudio20_formats[] = {
+
+	{UA20_FMT_ALAW, 8, AFMT_A_LAW, "8-bit A-Law"},
+	{UA20_FMT_MULAW, 8, AFMT_MU_LAW, "8-bit mu-Law"},
++
++	{UA20_FMT_RAW, 32, AFMT_DSD, "1-bit DSD"},
+	{0, 0, 0, NULL}
+ };
+
+@@ -529,6 +534,8 @@ static uint16_t	uaudio20_mixer_determine_class(const struct uaudio_terminal_node
+ static void	uaudio20_mixer_find_inputs_sub(struct uaudio_terminal_node *,
+		    const uint8_t *, uint8_t, struct uaudio_search_result *);
+ static const void *uaudio20_mixer_verify_desc(const void *, uint32_t);
++static usb_error_t uaudio20_set_format(struct usb_device *, uint8_t,
++		    uint8_t, uint32_t);
+ static usb_error_t uaudio20_set_speed(struct usb_device *, uint8_t,
+		    uint8_t, uint32_t);
+
+@@ -715,7 +722,7 @@ static driver_t uaudio_driver = {
+	.size = sizeof(struct uaudio_softc),
+ };
+
+-/* The following table is derived from Linux's quirks-table.h */
++/* The following table is derived from Linux's quirks-table.h */
+ static const STRUCT_USB_HOST_ID uaudio_vendor_midi[] = {
+	{ USB_VPI(USB_VENDOR_YAMAHA, 0x1000, 0) }, /* UX256 */
+	{ USB_VPI(USB_VENDOR_YAMAHA, 0x1001, 0) }, /* MU1000 */
+@@ -1438,7 +1445,7 @@ uaudio_configure_msg_sub(struct uaudio_softc *sc,
+		/* FALLTHROUGH */
+	} else if (sc->sc_audio_rev >= UAUDIO_VERSION_20) {
+		unsigned int x;
+-
++
+		for (x = 0; x != 256; x++) {
+			if (dir == PCMDIR_PLAY) {
+				if (!(sc->sc_mixer_clocks.bit_output[x / 8] &
+@@ -1478,7 +1485,6 @@ uaudio_configure_msg_sub(struct uaudio_softc *sc,
+		DPRINTF("could not allocate USB transfers!\n");
+		goto error;
+	}
+-
+	fps = usbd_get_isoc_fps(sc->sc_udev);
+
+	if (fps < 8000) {
+@@ -1760,6 +1766,7 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+	uint8_t audio_if = 0;
+	uint8_t midi_if = 0;
+	uint8_t uma_if_class;
++	uint32_t i;
+
+	while ((desc = usb_desc_foreach(cd, desc))) {
+		if ((desc->bDescriptorType == UDESC_INTERFACE) &&
+@@ -1951,7 +1958,11 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+
+			if ((bChannels != channels) ||
+			    (bBitResolution != bit_resolution)) {
+-				DPRINTF("Wrong number of channels\n");
++				DPRINTF("Wrong number of "
++					"bChannels:%d channels:%d, "
++					"bBitResolution:%d, bit_resolution:%d\n",
++					(int)bChannels, (int)channels,
++					(int)bBitResolution,(int)bit_resolution);
+				goto next_ep;
+			}
+
+@@ -1985,7 +1996,7 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+				if (uaudio20_check_rate(udev,
+				    sc->sc_mixer_iface_no, x, rate)) {
+					DPRINTF("Unsupported sampling "
+-					    "rate, id=%d\n", x);
++						"rate=%d, id=%d\n", rate, x);
+					goto next_ep;
+				}
+			}
+@@ -2029,7 +2040,11 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+
+			if ((bChannels != channels) ||
+			    (bBitResolution != bit_resolution)) {
+-				DPRINTF("Wrong number of channels\n");
++				DPRINTF("Wrong number of "
++					"bChannels:%d channels:%d, "
++					"bBitResolution:%d, bit_resolution:%d\n",
++					(int)bChannels, (int)channels,
++					(int)bBitResolution,(int)bit_resolution);
+				goto next_ep;
+			}
+		}
+@@ -2052,14 +2067,19 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+		chan->set_alt = 0;
+		chan->cur_alt = CHAN_MAX_ALT;
+
+-		chan_alt = &chan->usb_alt[chan->num_alt++];
++		if (chan->num_alt < CHAN_MAX_ALT)
++			chan_alt = &chan->usb_alt[chan->num_alt++];
++		else
++			chan_alt = &chan->usb_alt[CHAN_MAX_ALT-1];
+
+ #ifdef USB_DEBUG
+		uaudio_chan_dump_ep_desc(ed1);
+ #endif
+		DPRINTF("Sample rate = %dHz, channels = %d, "
+-		    "bits = %d, format = %s, ep 0x%02x, chan %p\n", rate, channels,
+-		    bit_resolution, p_fmt->description, ed1->bEndpointAddress, chan);
++		    "bits = %d, format = %s, ep 0x%02x, alt_index %d, chan %p\n",
++		    rate, channels,
++		    bit_resolution, p_fmt->description, ed1->bEndpointAddress,
++			alt_index, chan);
+
+		chan_alt->sample_rate = rate;
+		chan_alt->p_asf1d = asf1d;
+@@ -2115,6 +2135,7 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+		}
+		if (chan->num_alt > 1) {
+			/* we only accumulate one format at different sample rates */
++#if 0
+			if (chan->pcm_format[0] != format) {
+				DPRINTF("Multiple formats is not supported\n");
+				chan->num_alt--;
+@@ -2126,10 +2147,25 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+				chan->num_alt--;
+				goto next_ep;
+			}
++#endif
+		}
+		chan->pcm_cap.fmtlist = chan->pcm_format;
+-		chan->pcm_cap.fmtlist[0] = format;
+-
++		for (i = 0; i < chan->pcm_format_count; i++) {
++			if (chan->pcm_format[i] == format) {
++				break;
++			}
++		}
++		if (i == chan->pcm_format_count) {
++			if (chan->pcm_format_count >= CHAN_MAX_ALT) {
++				DPRINTF("pcm_format_count over.\n");
++			} else {
++				chan->pcm_cap.fmtlist[chan->pcm_format_count] = format;
++				DPRINTF("format[%d]: 0x%08x\n",
++				    chan->pcm_format_count,
++				    chan->pcm_cap.fmtlist[chan->pcm_format_count]);
++				chan->pcm_format_count++;
++			}
++		}
+		/* check if device needs bitperfect */
+		if (chan_alt->channels > UAUDIO_MATRIX_MAX)
+			sc->sc_pcm_bitperfect = 1;
+@@ -2148,6 +2184,8 @@ uaudio_chan_fill_info_sub(struct uaudio_softc *sc, struct usb_device *udev,
+ /* This structure defines all the supported rates. */
+
+ static const uint32_t uaudio_rate_list[CHAN_MAX_ALT] = {
++	768000,
++	705600,
+	384000,
+	352800,
+	192000,
+@@ -2441,7 +2479,7 @@ uaudio_chan_play_callback(struct usb_xfer *xfer, usb_error_t error)
+				/* reset receive jitter counters */
+				ch_rec->jitter_curr = 0;
+				ch_rec->jitter_rem = 0;
+-
++
+				/* compute exact number of transmit jitter samples */
+				rx_rate = ch_rec->usb_alt[rec_alt].sample_rate;
+				ch->jitter_curr += tx_jitter / rx_rate;
+@@ -2715,6 +2753,13 @@ uaudio_chan_free(struct uaudio_chan *ch)
+	return (0);
+ }
+
++int
++uaudio_chan_reset(struct uaudio_chan *ch)
++{
++	DELAY(50000);
++	return (0);
++}
++
+ int
+ uaudio_chan_set_param_blocksize(struct uaudio_chan *ch, uint32_t blocksize)
+ {
+@@ -2733,27 +2778,51 @@ uaudio_chan_set_param_fragments(struct uaudio_chan *ch, uint32_t blocksize,
+ int
+ uaudio_chan_set_param_speed(struct uaudio_chan *ch, uint32_t speed)
+ {
++	struct uaudio_chan_alt *chan_alt;
+	struct uaudio_softc *sc;
+-	uint8_t x, y;
++	uint8_t next_alt;
+
+	sc = ch->priv_sc;
+
+-	for (x = 0, y = 1; y < ch->num_alt; y++) {
+-		/* prefer sample rate closer to and greater than requested */
+-		if ((ch->usb_alt[x].sample_rate < speed &&
+-		    ch->usb_alt[x].sample_rate < ch->usb_alt[y].sample_rate) ||
+-		    (speed <= ch->usb_alt[y].sample_rate &&
+-		    ch->usb_alt[y].sample_rate < ch->usb_alt[x].sample_rate))
+-			x = y;
++	for (next_alt = 0; next_alt < ch->num_alt; next_alt++) {
++		if (AFMT_ENCODING(sndbuf_getfmt(ch->pcm_ch->bufhard)) ==
++		    AFMT_ENCODING(ch->usb_alt[next_alt].p_fmt->freebsd_fmt) &&
++		    ch->usb_alt[next_alt].sample_rate == speed)
++			break;
+	}
++	if (next_alt == ch->num_alt)
++		next_alt--;
+
+	usb_proc_explore_lock(sc->sc_udev);
+-	ch->set_alt = x;
++	ch->set_alt = next_alt;
+	usb_proc_explore_unlock(sc->sc_udev);
+
+-	DPRINTF("Selecting alt %d\n", (int)x);
++	DPRINTF("Selecting alt %d, speed=%d\n", (int)next_alt, speed);
++	chan_alt = ch->usb_alt + next_alt;
++	if (sc->sc_audio_rev >= UAUDIO_VERSION_20 &&
++	    sc->sc_audio_rev < UAUDIO_VERSION_30) {
++		unsigned int x;
++		uint8_t ep_dir;
+
+-	return (ch->usb_alt[x].sample_rate);
++		ep_dir = UE_GET_DIR(chan_alt->p_ed1->bEndpointAddress);
++		for (x = 0; x != 256; x++) {
++			if (ep_dir == UE_DIR_OUT) {
++				if (!(sc->sc_mixer_clocks.bit_output[x / 8] &
++				    (1 << (x % 8))))
++					continue;
++			} else {
++				if (!(sc->sc_mixer_clocks.bit_input[x / 8] &
++				    (1 << (x % 8))))
++					continue;
++			}
++			if (uaudio20_set_speed(sc->sc_udev, sc->sc_mixer_iface_no,
++			    x, chan_alt->sample_rate)) {
++				DPRINTF("setting of speed failed!\n");
++				return (0);
++			}
++		}
++	}
++	return (chan_alt->sample_rate);
+ }
+
+ int
+@@ -2816,7 +2885,68 @@ uaudio_chan_getmatrix(struct uaudio_chan *ch, uint32_t format)
+ int
+ uaudio_chan_set_param_format(struct uaudio_chan *ch, uint32_t format)
+ {
++	struct uaudio_softc *sc;
++	struct uaudio_chan_alt *chan_alt;
++	uint8_t next_alt;
++
+	DPRINTF("Selecting format 0x%08x\n", (unsigned int)format);
++
++	sc = ch->priv_sc;
++
++	for (next_alt = 0; next_alt < ch->num_alt; next_alt++) {
++		if (sndbuf_getspd(ch->pcm_ch->bufhard)
++		    == ch->usb_alt[next_alt].sample_rate
++		    && AFMT_ENCODING(format)
++		    == AFMT_ENCODING(ch->usb_alt[next_alt].p_fmt->freebsd_fmt))
++			break;
++	}
++	if (next_alt == ch->num_alt)
++		next_alt--;
++
++	usb_proc_explore_lock(sc->sc_udev);
++	ch->set_alt = next_alt;
++	usb_proc_explore_unlock(sc->sc_udev);
++	/* mtx_lock(ch->pcm_mtx); */
++	/* next_alt = ch->set_alt; */
++	/* mtx_unlock(ch->pcm_mtx); */
++
++	DPRINTF("Selecting alt %d\n", (int)next_alt);
++	chan_alt = ch->usb_alt + next_alt;
++
++	if (sc->sc_audio_rev >= UAUDIO_VERSION_30) {
++		DPRINTF("uaudio_version_30\n");
++		/* FALLTHROUGH */
++	} else if (sc->sc_audio_rev >= UAUDIO_VERSION_20) {
++		unsigned int x;
++		uint8_t ep_dir;
++		usb_error_t	err;
++
++		ep_dir = UE_GET_DIR(chan_alt->p_ed1->bEndpointAddress);
++
++		for (x = 0; x != 256; x++) {
++			if (ep_dir == UE_DIR_OUT) {
++				if (!(sc->sc_mixer_clocks.bit_output[x / 8] &
++				    (1 << (x % 8)))) {
++					continue;
++				}
++			} else {
++				if (!(sc->sc_mixer_clocks.bit_input[x / 8] &
++				    (1 << (x % 8)))) {
++					continue;
++				}
++			}
++
++			if ((err = uaudio20_set_format(
++				    sc->sc_udev,
++				    sc->sc_mixer_iface_no,
++				    x,
++				    chan_alt->p_fmt->wFormat))){
++				DPRINTF("setting of format failed! err=%s\n",
++					usbd_errstr(err));
++				/* return	(1); */
++			}
++		}
++	}
+	return (0);
+ }
+
+@@ -3500,7 +3630,7 @@ uaudio_mixer_check_selectors(struct uaudio_softc *sc)
+	uint16_t j;
+	uint16_t k;
+
+-	/* remove existing selector types from the reserve */
++	/* remove existing selector types from the reserve */
+	for (i = 0; i < MIX(sc).maxval; i++) {
+		if (MIX(sc).slctrtype[i] == SOUND_MIXER_NRDEVICES)
+			continue;
+@@ -3841,7 +3971,7 @@ uaudio20_mixer_add_feature(struct uaudio_softc *sc,
+			MIX(sc).name = "mute";
+			what = MUTE_CONTROL;
+			break;
+-		case (3 << 2):
++		case (3 << 2):
+			MIX(sc).type = MIX_SIGNED_16;
+			MIX(sc).ctl = mixernumber;
+			MIX(sc).name = "vol";
+@@ -5335,6 +5465,34 @@ uaudio_set_speed(struct usb_device *udev, uint8_t endpt, uint32_t speed)
+	return (usbd_do_request(udev, NULL, &req, data));
+ }
+
++static usb_error_t
++uaudio20_set_format(struct usb_device *udev, uint8_t iface_no,
++    uint8_t clockid, uint32_t format)
++{
++	struct usb_device_request req;
++	uint8_t data[8];
++
++	DPRINTFN(6, "ifaceno=%d clockid=%d format=0x%08x\n",
++	    iface_no, clockid, format);
++
++	req.bmRequestType = UT_WRITE_CLASS_INTERFACE;
++	req.bRequest = UA20_CS_CUR;
++	USETW2(req.wValue, UA20_CS_AUDIO_FORMAT_CONTROL, 0);
++	USETW2(req.wIndex, clockid, iface_no);
++	USETW(req.wLength, 8);
++	/* USETDW(data,format); */
++	data[0] = format;
++	data[1] = format >> 8;
++	data[2] = format >> 16;
++	data[3] = format >> 24;
++	data[4] = 0;	/* format >> 32 */
++	data[5] = 0;	/* format >> 40 */
++	data[6] = 0;	/* format >> 48 */
++	data[7] = 0;	/* format >> 56 */
++
++	return (usbd_do_request(udev, NULL, &req, data));
++}
++
+ static usb_error_t
+ uaudio20_set_speed(struct usb_device *udev, uint8_t iface_no,
+     uint8_t clockid, uint32_t speed)
+diff --git a/sys/dev/sound/usb/uaudio.h b/sys/dev/sound/usb/uaudio.h
+index 54b31a4e7bd2..7b1b18af0c91 100644
+--- a/sys/dev/sound/usb/uaudio.h
++++ b/sys/dev/sound/usb/uaudio.h
+@@ -43,6 +43,7 @@ extern int	uaudio_detach_sub(device_t dev);
+ extern void	*uaudio_chan_init(struct uaudio_chan *ch, struct snd_dbuf *b,
+		    struct pcm_channel *c, int dir);
+ extern int	uaudio_chan_free(struct uaudio_chan *ch);
++extern int	uaudio_chan_reset(struct uaudio_chan *ch);
+ extern int	uaudio_chan_set_param_blocksize(struct uaudio_chan *ch,
+		    uint32_t blocksize);
+ extern int	uaudio_chan_set_param_fragments(struct uaudio_chan *ch,
+diff --git a/sys/dev/sound/usb/uaudio_pcm.c b/sys/dev/sound/usb/uaudio_pcm.c
+index 0b3da9b20440..18ba6e8b6fb2 100644
+--- a/sys/dev/sound/usb/uaudio_pcm.c
++++ b/sys/dev/sound/usb/uaudio_pcm.c
+@@ -49,6 +49,12 @@ ua_chan_free(kobj_t obj, void *data)
+	return (uaudio_chan_free(data));
+ }
+
++static int
++ua_chan_reset(kobj_t obj, void *data)
++{
++	return (uaudio_chan_reset(data));
++}
++
+ static int
+ ua_chan_setformat(kobj_t obj, void *data, uint32_t format)
+ {
+@@ -111,6 +117,7 @@ ua_chan_getmatrix(kobj_t obj, void *data, uint32_t format)
+ static kobj_method_t ua_chan_methods[] = {
+	KOBJMETHOD(channel_init, ua_chan_init),
+	KOBJMETHOD(channel_free, ua_chan_free),
++	KOBJMETHOD(channel_reset, ua_chan_reset),
+	KOBJMETHOD(channel_setformat, ua_chan_setformat),
+	KOBJMETHOD(channel_setspeed, ua_chan_setspeed),
+	KOBJMETHOD(channel_setblocksize, ua_chan_setblocksize),
+diff --git a/sys/dev/sound/usb/uaudioreg.h b/sys/dev/sound/usb/uaudioreg.h
+index aba07cf3c773..c7675ccac530 100644
+--- a/sys/dev/sound/usb/uaudioreg.h
++++ b/sys/dev/sound/usb/uaudioreg.h
+@@ -782,6 +782,7 @@ struct usb_audio20_cluster {
+
+ #define	UA20_CS_SAM_FREQ_CONTROL	0x01
+ #define	UA20_CS_CLOCK_VALID_CONTROL 	0x02
++#define	UA20_CS_AUDIO_FORMAT_CONTROL 	0x03
+
+ #define	UA20_TE_COPY_PROTECT_CONTROL	0x01
+ #define	UA20_TE_CONNECTOR_CONTROL	0x02
+@@ -802,6 +803,7 @@ struct usb_audio20_cluster {
+ #define	UA20_FMT_FLOAT	(1U << 2)
+ #define	UA20_FMT_ALAW	(1U << 3)
+ #define	UA20_FMT_MULAW	(1U << 4)
++#define	UA20_FMT_DSD	(1U << 5)
+ #define	UA20_FMT_RAW	(1U << 31)
+
+ #endif					/* _UAUDIOREG_H_ */
+diff --git a/sys/sys/soundcard.h b/sys/sys/soundcard.h
+index aab67532503e..d57cffaaacc1 100644
+--- a/sys/sys/soundcard.h
++++ b/sys/sys/soundcard.h
+@@ -170,6 +170,7 @@ struct snd_size {
+ #define AFMT_U16_BE	0x00000100	/* Big endian unsigned 16-bit */
+ #define AFMT_MPEG	0x00000200	/* MPEG MP2/MP3 audio */
+ #define AFMT_AC3	0x00000400	/* Dolby Digital AC3 */
++#define AFMT_DSD	0x00000800	/* 1-bit DSD */
+
+ /*
+  * 32-bit formats below used for 24-bit audio data where the data is stored
